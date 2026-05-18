@@ -41,6 +41,9 @@ from diffusers.models.normalization import AdaLayerNormContinuous, AdaLayerNormZ
 from diffusers.utils import is_torch_version
 
 
+from attn_processor_flash import HunyuanVideoFlashAttnProcessor
+
+
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 class Qwen2RMSNorm(nn.Module):
@@ -537,7 +540,7 @@ class HunyuanVideoSingleTransformerBlock(nn.Module):
             heads=num_attention_heads,
             out_dim=hidden_size,
             bias=True,
-            processor=HunyuanVideoAttnProcessor2_0(),
+            processor=HunyuanVideoFlashAttnProcessor(),
             qk_norm=qk_norm,
             eps=1e-6,
             pre_only=True,
@@ -617,7 +620,7 @@ class HunyuanVideoTransformerBlock(nn.Module):
             out_dim=hidden_size,
             context_pre_only=False,
             bias=True,
-            processor=HunyuanVideoAttnProcessor2_0(),
+            processor=HunyuanVideoFlashAttnProcessor(),
             qk_norm=qk_norm,
             eps=1e-6,
         )
@@ -692,7 +695,7 @@ class HunyuanVideoTokenReplaceSingleTransformerBlock(nn.Module):
             heads=num_attention_heads,
             out_dim=hidden_size,
             bias=True,
-            processor=HunyuanVideoAttnProcessor2_0(),
+            processor=HunyuanVideoFlashAttnProcessor(),
             qk_norm=qk_norm,
             eps=1e-6,
             pre_only=True,
@@ -776,7 +779,7 @@ class HunyuanVideoTokenReplaceTransformerBlock(nn.Module):
             out_dim=hidden_size,
             context_pre_only=False,
             bias=True,
-            processor=HunyuanVideoAttnProcessor2_0(),
+            processor=HunyuanVideoFlashAttnProcessor(),
             qk_norm=qk_norm,
             eps=1e-6,
         )
