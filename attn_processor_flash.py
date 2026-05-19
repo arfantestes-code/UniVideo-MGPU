@@ -89,6 +89,8 @@ class HunyuanVideoFlashAttnProcessor:
         flash_attn_func expects: (B, N, heads, head_dim)
         Returns: (B, heads, N, head_dim)
         """
+        assert query.device == key.device == value.device, \
+            f"flash_attn requires Q/K/V on same device, got {query.device}/{key.device}/{value.device}"
         # Transpose to flash_attn layout
         q = query.transpose(1, 2)   # (B, N, H, D)
         k = key.transpose(1, 2)
@@ -206,6 +208,13 @@ class HunyuanVideoFlashAttnProcessor:
             and query.dtype in (torch.float16, torch.bfloat16)
         )
 
+        if attention_mask is not None:
+            # Extend mask to cover encoder tokens (always valid)
+            enc_len = encoder_hidden_states.shape[1] if encoder_hidden_states is not None else 0
+            if enc_len > 0:
+                enc_mask = torch.ones(B, enc_len, dtype=torch.bool, device=attention_mask.device)
+                attention_mask = torch.cat([attention_mask_2d, enc_mask], dim=1)  # (B, N+enc_len)
+        
         if use_flash_here:
             if attention_mask is None:
                 hidden_states = self._flash_attn(query, key, value)
@@ -213,10 +222,9 @@ class HunyuanVideoFlashAttnProcessor:
                 hidden_states = self._flash_attn_varlen(query, key, value, attention_mask)
         else:
             # Original SDPA fallback
-            from torch.backends.cuda import sdp_kernel
-            ctx = sdp_kernel(enable_flash=True, enable_mem_efficient=False, enable_math=False) \
-                  if query.is_cuda else torch.no_grad.__class__()  # dummy ctx
-            with ctx:
+            from torch.nn.attention import sdpa_kernel, SDPBackend
+            import contextlib
+            with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
                 hidden_states = F.scaled_dot_product_attention(
                     query, key, value,
                     attn_mask=attention_mask,
@@ -228,18 +236,17 @@ class HunyuanVideoFlashAttnProcessor:
         hidden_states = hidden_states.to(query.dtype)
 
         # 6. Output projection + split encoder
-        if encoder_hidden_states is not None:
-            enc_seq = encoder_hidden_states.shape[1]
-            hidden_states, encoder_hidden_states = (
-                hidden_states[:, :-enc_seq],
-                hidden_states[:, -enc_seq:],
-            )
-
-        if getattr(attn, "to_out", None) is not None:
-            hidden_states = attn.to_out[0](hidden_states)
-            hidden_states = attn.to_out[1](hidden_states)
-
-        if getattr(attn, "to_add_out", None) is not None:
-            encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
+            # Correct guard — match the original's structure
+            if encoder_hidden_states is not None:
+                enc_seq = encoder_hidden_states.shape[1]
+                hidden_states, encoder_hidden_states = (
+                    hidden_states[:, :-enc_seq],
+                    hidden_states[:, -enc_seq:],
+                )
+                if getattr(attn, "to_out", None) is not None:
+                    hidden_states = attn.to_out[0](hidden_states)
+                    hidden_states = attn.to_out[1](hidden_states)
+                if getattr(attn, "to_add_out", None) is not None:
+                    encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
 
         return hidden_states, encoder_hidden_states
