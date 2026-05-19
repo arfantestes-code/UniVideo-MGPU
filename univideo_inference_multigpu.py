@@ -133,7 +133,8 @@ def build_pipeline(cfg: dict, strategy: str, local_rank: int, use_flash: bool):
     if strategy == "model_parallel":
         vae_kwargs["device_map"] = "auto"   # shard if large enough
     vae = AutoencoderKLHunyuanVideo.from_pretrained(
-        pipe_cfg.hunyuan_model_id, **vae_kwargs
+        pipe_cfg.hunyuan_model_id,
+        torch_dtype=torch.bfloat16, **vae_kwargs
     ).eval()
 
     # ── Transformer ───────────────────────────────────────────────────
@@ -145,16 +146,21 @@ def build_pipeline(cfg: dict, strategy: str, local_rank: int, use_flash: bool):
         text_embed_dim=qwenvl_txt_dim,
     )
     if strategy == "model_parallel":
-        # device_map="auto" shards layers across GPUs by parameter count.
-        # This is the key change for fitting a 13B+ model on multiple GPUs.
-        transformer_kwargs["device_map"] = "auto"
+        vae_kwargs = dict(subfolder="vae", low_cpu_mem_usage=True,
+                          device_map="auto", torch_dtype=torch.bfloat16)
+        transformer_kwargs = dict(subfolder="transformer", low_cpu_mem_usage=True,
+                                  device_map="auto", torch_dtype=torch.bfloat16,
+                                  text_embed_dim=qwenvl_txt_dim)
 
     transformer = HunyuanVideoTransformer3DModel.from_pretrained(
-        pipe_cfg.hunyuan_model_id, **transformer_kwargs
+      torch_dtype=torch.bfloat16,  
+      pipe_cfg.hunyuan_model_id, **transformer_kwargs
     )
 
+    # Determine the device of the first transformer parameter
+    first_device = next(transformer.parameters()).device
     # Reinitialise the Qwen projection head
-    transformer.qwen_project_in = TwoLayerMLP(qwenvl_txt_dim, qwenvl_txt_dim * 4, 4096)
+    transformer.qwen_project_in = TwoLayerMLP(qwenvl_txt_dim, qwenvl_txt_dim * 4, 4096).to(first_device) # Maps to first device
     with torch.no_grad():
         torch.nn.init.ones_(transformer.qwen_project_in.ln.weight)
         for layer in transformer.qwen_project_in.mlp:
@@ -184,19 +190,21 @@ def build_pipeline(cfg: dict, strategy: str, local_rank: int, use_flash: bool):
 
     # ── Scheduler ─────────────────────────────────────────────────────
     scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-        pipe_cfg.hunyuan_model_id, subfolder="scheduler"
+      torch_dtype=torch.bfloat16,  
+      pipe_cfg.hunyuan_model_id, subfolder="scheduler"
     )
 
     # ── Assemble pipeline ─────────────────────────────────────────────
     if strategy == "model_parallel":
         # device_map="auto" already placed modules; don't call .to(device=...)
+        mllm_encoder = mllm_encoder.to(device="cuda:0", dtype=torch.bfloat16)
         pipeline = UniVideoPipeline(
             transformer=transformer,
             vae=vae,
             scheduler=scheduler,
             mllm_encoder=mllm_encoder,
             univideo_config=pipe_cfg,
-        ).to(dtype=torch.bfloat16)
+        )
     else:
         device = f"cuda:{local_rank}"
         pipeline = UniVideoPipeline(
@@ -225,8 +233,7 @@ def _swap_attn_processors(model: torch.nn.Module,
 
     for module in model.modules():
         if isinstance(module, Attention):
-            if _Orig is None or isinstance(module.processor, _Orig):
-                module.set_processor(processor)
+            module.set_processor(processor)
 
 
 # ──────────────────────────────────────────────
@@ -441,7 +448,7 @@ def main():
     # ── Save on rank 0 only ───────────────────────────────────────────
     if is_main(local_rank) and output_path is not None:
         save_output(output, output_path)
-    elif args.demo_task == "understanding":
+    elif args.demo_task == "understanding" and is_main(local_rank):
         if hasattr(output, "text") and output.text:
             print(f"[Rank {local_rank}] {output.text[0]}")
 
